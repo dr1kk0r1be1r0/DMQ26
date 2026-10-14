@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Tour VR – Escritório</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;font-family:system-ui,sans-serif;color:#e8ecf5;touch-action:none}
+  canvas{display:block}
+  #intro{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:24px;text-align:center;background:rgba(5,8,16,.8)}
+  #intro h1{margin:0;font-size:1.5rem;font-weight:600}
+  #intro p{margin:0;max-width:38ch;line-height:1.45;color:#aab3c8}
+  #go{font:inherit;font-weight:600;padding:14px 28px;border:0;border-radius:999px;background:#5eead4;color:#04201c}
+  #go:focus-visible{outline:3px solid #fff;outline-offset:3px}
+</style>
+</head>
+<body>
+<div id="intro">
+  <h1>Tour virtual do escritório</h1>
+  <p>Deixe o celular na horizontal, toque em iniciar e encaixe no óculos. Olhe para uma seta por um instante (ou toque na tela) para ir a outro espaço. Olhe para a guia para ouvir a próxima fala. Toque duas vezes para sair.</p>
+  <button id="go">Iniciar</button>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+/* ============ CONFIGURAÇÃO ============ */
+const NOME_GUIA = 'Ana';
+// pos = [x, z] de onde você olha (altura dos olhos 1,6 m); guia = [x, z] onde a guia fica nesse local.
+const STOPS = [
+  { nome:'Recepção', pos:[-4, 3.2], guia:[-2.0, 1.6], falas:[
+    'Olá! Eu sou a Ana, sua guia neste escritório.',
+    'Aqui é a recepção: visitantes se registram e recebem o crachá.',
+    'Olhe para as setas flutuantes para visitar os outros espaços.' ] },
+  { nome:'Área de trabalho', pos:[0.4, 2.0], guia:[1.8, 0.6], falas:[
+    'Esta é a área de trabalho. Cada baia tem monitor, teclado e cadeira ergonômica.',
+    'Os times ficam lado a lado para facilitar a conversa no dia a dia.' ] },
+  { nome:'Sala de reunião', pos:[5.2, -1.0], guia:[6.2, -1.9], falas:[
+    'Esta é a sala de reunião. Cabem 6 pessoas na mesa.',
+    'O quadro branco é ótimo para brainstorms. Para voltar, olhe para uma seta.' ] }
+];
+
+// Correção de lente (ajuste pela URL: ?k1=0.25&k2=0.1&fov=100&zoom=1.1)
+const Q = new URLSearchParams(location.search);
+const num = (n, d) => (Q.has(n) && !isNaN(+Q.get(n))) ? +Q.get(n) : d;
+const K1 = num('k1', 0.20), K2 = num('k2', 0.08), FOV = num('fov', 95), ZOOM = num('zoom', 1.0);
+const IPD = 0.064;
+
+/* ============ BASE ============ */
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0e1320);
+const rig = new THREE.Group();
+const camera = new THREE.PerspectiveCamera(FOV, 1, 0.05, 100);
+rig.add(camera); scene.add(rig);
+
+const M = c => new THREE.MeshLambertMaterial({color:c});
+const B = c => new THREE.MeshBasicMaterial({color:c});
+function box(w, h, d, c, x, y, z, p) {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), typeof c === 'object' ? c : M(c));
+  m.position.set(x, y, z); (p || scene).add(m); return m;
+}
+function rr(g, x, y, w, h, r) {
+  g.beginPath(); g.moveTo(x + r, y); g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r);
+  g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r); g.closePath();
+}
+
+// retículo e fade preto (transição)
+const reticle = new THREE.Group(); reticle.position.set(0, 0, -2);
+const ring = new THREE.Mesh(new THREE.RingGeometry(0.045, 0.06, 40), new THREE.MeshBasicMaterial({color:0xffffff, depthTest:false, transparent:true, opacity:.9}));
+const fill = new THREE.Mesh(new THREE.CircleGeometry(0.045, 40), new THREE.MeshBasicMaterial({color:0x5eead4, depthTest:false, transparent:true}));
+ring.renderOrder = 998; fill.renderOrder = 999; fill.scale.setScalar(0.001);
+reticle.add(ring, fill); rig.add(reticle);
+const fade = new THREE.Mesh(new THREE.SphereGeometry(0.5, 16, 12),
+  new THREE.MeshBasicMaterial({color:0, transparent:true, opacity:1, side:THREE.BackSide, depthTest:false, depthWrite:false}));
+fade.renderOrder = 1000; rig.add(fade);
+
+/* ============ ESCRITÓRIO ============ */
+scene.add(new THREE.HemisphereLight(0xffffff, 0x70788c, 1.0));
+const dl = new THREE.DirectionalLight(0xffffff, 0.45); dl.position.set(3, 6, 4); scene.add(dl);
+
+// piso xadrez
+const fc = document.createElement('canvas'); fc.width = fc.height = 128;
+const fg = fc.getContext('2d'); fg.fillStyle = '#8b92a1'; fg.fillRect(0, 0, 128, 128);
+fg.fillStyle = '#9ba2b0'; fg.fillRect(0, 0, 64, 64); fg.fillRect(64, 64, 64, 64);
+const ft = new THREE.CanvasTexture(fc); ft.wrapS = ft.wrapT = THREE.RepeatWrapping; ft.repeat.set(7, 5); ft.anisotropy = 4;
+const floor = new THREE.Mesh(new THREE.PlaneGeometry(14, 10), new THREE.MeshLambertMaterial({map:ft}));
+floor.rotation.x = -Math.PI / 2; scene.add(floor);
+const ceil = new THREE.Mesh(new THREE.PlaneGeometry(14, 10), M(0xe3e6ed));
+ceil.rotation.x = Math.PI / 2; ceil.position.y = 3; scene.add(ceil);
+for (let i = 0; i < 4; i++) for (let j = 0; j < 2; j++) box(1.8, 0.04, 0.5, B(0xffffff), -5.2 + i * 3.5, 2.97, -2.5 + j * 5);
+
+// paredes e janelas
+[[14.4, 3, 0.2, 0, -5.1], [14.4, 3, 0.2, 0, 5.1], [0.2, 3, 10.4, -7.1, 0], [0.2, 3, 10.4, 7.1, 0]]
+  .forEach(w => box(w[0], w[1], w[2], 0xdde1ea, w[3], 1.5, w[4]));
+for (let x = -5; x <= 5; x += 2.5) box(1.8, 1.3, 0.05, B(0x9bd3ff), x, 1.7, -4.98);
+
+// mesa, cadeira, planta
+const chair = (x, z, ry) => {
+  const g = new THREE.Group(); g.position.set(x, 0, z); g.rotation.y = ry; scene.add(g);
+  box(0.45, 0.06, 0.45, 0x2b3a55, 0, 0.47, 0, g); box(0.45, 0.5, 0.05, 0x2b3a55, 0, 0.77, 0.21, g);
+  box(0.06, 0.4, 0.06, 0x555b6b, 0, 0.24, 0, g); box(0.45, 0.04, 0.05, 0x555b6b, 0, 0.03, 0, g); box(0.05, 0.04, 0.45, 0x555b6b, 0, 0.03, 0, g);
+};
+const screenColors = [B(0x4aa3ff), B(0x7ee0c3)];
+let sc = 0;
+const desk = (x, z) => {
+  box(1.4, 0.05, 0.7, 0xd6d9e0, x, 0.75, z); box(0.04, 0.73, 0.65, 0x9aa0ad, x - 0.68, 0.37, z); box(0.04, 0.73, 0.65, 0x9aa0ad, x + 0.68, 0.37, z);
+  box(0.55, 0.32, 0.03, 0x151a2b, x, 1.08, z - 0.2); box(0.5, 0.27, 0.01, screenColors[sc++ % 2], x, 1.08, z - 0.18);
+  box(0.05, 0.2, 0.05, 0x151a2b, x, 0.88, z - 0.2); box(0.4, 0.02, 0.14, 0x30364a, x, 0.78, z + 0.14);
+  chair(x, z + 0.85, 0);
+};
+[-1.2, -3.2].forEach(z => [-2.8, -1.2, 0.4, 2.0].forEach(x => desk(x, z)));
+const plant = (x, z) => {
+  const pot = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.16, 0.35, 12), M(0x8a5a3a)); pot.position.set(x, 0.18, z); scene.add(pot);
+  [[0.42, 0.8, 0x2f7a3d], [0.3, 1.15, 0x3c9650]].forEach(f => {
+    const s = new THREE.Mesh(new THREE.SphereGeometry(f[0], 12, 10), M(f[2])); s.position.set(x, f[1], z); scene.add(s);
+  });
+};
+[[-6.4, -4.4], [-6.4, 4.4], [6.4, 4.4], [2.9, 0.5], [-6.4, 0]].forEach(p => plant(p[0], p[1]));
+
+// recepção
+box(3, 1.05, 0.8, 0x2b3a55, -4, 0.525, 0.5); box(3.2, 0.06, 1.0, 0xe8eaf0, -4, 1.08, 0.5);
+
+// sala de reunião (vidro)
+const glass = new THREE.MeshLambertMaterial({color:0x9fd8e8, transparent:true, opacity:0.28, depthWrite:false});
+box(0.05, 2.6, 4.2, glass, 3.8, 1.3, -2.7);
+box(0.8, 2.6, 0.05, glass, 4.2, 1.3, -0.6); box(1.1, 2.6, 0.05, glass, 6.35, 1.3, -0.6);
+box(2.4, 0.06, 1.1, 0x6b4a32, 5.4, 0.75, -3); box(0.08, 0.72, 0.8, 0x333847, 4.4, 0.36, -3); box(0.08, 0.72, 0.8, 0x333847, 6.4, 0.36, -3);
+[4.6, 5.4, 6.2].forEach(x => { chair(x, -4.0, Math.atan2(0, 1) + Math.PI); chair(x, -2.0, 0); });
+box(0.05, 1.1, 2.0, 0xf5f7fa, 6.88, 1.5, -3);
+
+/* ============ SPRITES (placas, setas, fala) ============ */
+function makeSprite(text, icon, width, depth) {
+  const c = document.createElement('canvas'); c.width = 512; c.height = icon ? 320 : 128;
+  const g = c.getContext('2d');
+  if (icon) {
+    g.beginPath(); g.arc(256, 110, 90, 0, 7); g.fillStyle = 'rgba(94,234,212,.92)'; g.fill();
+    g.lineWidth = 10; g.strokeStyle = '#fff'; g.stroke(); g.fillStyle = '#04201c'; g.beginPath();
+    g.moveTo(256, 50); g.lineTo(312, 130); g.lineTo(270, 130); g.lineTo(270, 172); g.lineTo(242, 172); g.lineTo(242, 130); g.lineTo(200, 130); g.closePath(); g.fill();
+    g.shadowColor = '#000'; g.shadowBlur = 14;
+  } else { g.fillStyle = 'rgba(10,16,32,.8)'; rr(g, 4, 4, 504, 120, 30); g.fill(); }
+  g.font = '600 54px system-ui,sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillStyle = '#fff'; g.fillText(text, 256, icon ? 272 : 64);
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(c), transparent:true, depthTest:!!depth, fog:false}));
+  sp.renderOrder = 10; sp.scale.set(width, width * c.height / c.width, 1);
+  if (icon) sp.center.set(0.5, 0.66);
+  return sp;
+}
+const sign = (t, x, y, z) => { const s = makeSprite(t, false, 2.4, true); s.position.set(x, y, z); scene.add(s); };
+sign('Recepção', -4, 2.3, 0.5); sign('Área de trabalho', 0.4, 2.5, -2.2); sign('Sala de reunião', 5.3, 2.5, -0.6);
+
+/* ============ PERSONAGEM 3D (guia) ============ */
+const SKIN = 0xf0c4a0;
+function makeGuide() {
+  const g = new THREE.Group(), p = {g};
+  const limb = (w, h, d, c, x, y, hand) => {
+    const q = new THREE.Group(); q.position.set(x, y, 0); box(w, h, d, c, 0, -h / 2, 0, q); g.add(q);
+    if (hand) { const m = new THREE.Mesh(new THREE.SphereGeometry(0.055, 10, 8), M(SKIN)); m.position.y = -h - 0.02; q.add(m); }
+    else box(0.15, 0.07, 0.25, 0x111111, 0, -h + 0.035, 0.04, q);
+    return q;
+  };
+  p.legL = limb(0.15, 0.88, 0.17, 0x23263a, -0.1, 0.9);  p.legR = limb(0.15, 0.88, 0.17, 0x23263a, 0.1, 0.9);
+  p.armL = limb(0.1, 0.56, 0.1, 0x1f6f8b, -0.28, 1.5, true); p.armR = limb(0.1, 0.56, 0.1, 0x1f6f8b, 0.28, 1.5, true);
+  p.torso = box(0.44, 0.62, 0.24, 0x1f6f8b, 0, 1.21, 0, g);
+  p.head = new THREE.Group(); p.head.position.y = 1.66; g.add(p.head);
+  p.head.add(new THREE.Mesh(new THREE.SphereGeometry(0.13, 16, 12), M(SKIN)));
+  const hair = new THREE.Mesh(new THREE.SphereGeometry(0.14, 16, 12), M(0x2b1d14)); hair.scale.y = 0.85; hair.position.set(0, 0.035, -0.02); p.head.add(hair);
+  [-0.05, 0.05].forEach(x => { const e = new THREE.Mesh(new THREE.SphereGeometry(0.016, 8, 6), B(0x111111)); e.position.set(x, 0.01, 0.122); p.head.add(e); });
+  box(0.05, 0.012, 0.01, B(0x8a2b2b), 0, -0.05, 0.122, p.head);
+  scene.add(g); return p;
+}
+const guide = makeGuide(), gp = guide.g.position;
+
+// balão de fala
+const bc = document.createElement('canvas'); bc.width = 768; bc.height = 320;
+const bubble = new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(bc), transparent:true, fog:false}));
+bubble.scale.set(2.2, 2.2 * 320 / 768, 1); bubble.center.set(0.5, 0.03); bubble.position.y = 1.9; bubble.visible = false;
+guide.g.add(bubble);
+function setBubble(text) {
+  const g = bc.getContext('2d'); g.clearRect(0, 0, 768, 320);
+  g.fillStyle = 'rgba(255,255,255,.97)'; rr(g, 10, 10, 748, 250, 36); g.fill();
+  g.beginPath(); g.moveTo(350, 258); g.lineTo(418, 258); g.lineTo(384, 312); g.closePath(); g.fill();
+  g.font = '600 44px system-ui,sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillStyle = '#0b1020';
+  const lines = []; let cur = '';
+  text.split(' ').forEach(w => { const t = cur ? cur + ' ' + w : w; if (g.measureText(t).width > 690 && cur) { lines.push(cur); cur = w; } else cur = t; });
+  lines.push(cur);
+  lines.forEach((l, i) => g.fillText(l, 384, 135 + (i - (lines.length - 1) / 2) * 54));
+  bubble.material.map.needsUpdate = true; bubble.visible = true;
+}
+
+let walking = false, waveT = 0, lineIdx = 0, cur = 0;
+const spot = new THREE.Vector3();
+function nextLine() { const f = STOPS[cur].falas; lineIdx = (lineIdx + 1) % f.length; setBubble(f[lineIdx]); waveT = 0.8; }
+
+function animGuide(dt, t) {
+  let moving = false, ty = guide.g.rotation.y;
+  if (walking) {
+    const dx = spot.x - gp.x, dz = spot.z - gp.z, d = Math.hypot(dx, dz);
+    if (d < 0.05) { walking = false; waveT = 2.2; lineIdx = 0; setBubble(STOPS[cur].falas[0]); }
+    else { const s = Math.min(d, 1.4 * dt); gp.x += dx / d * s; gp.z += dz / d * s; ty = Math.atan2(dx, dz); moving = true; }
+  }
+  if (!moving) ty = Math.atan2(rig.position.x - gp.x, rig.position.z - gp.z);   // olha para você
+  const diff = ((ty - guide.g.rotation.y + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+  guide.g.rotation.y += diff * Math.min(1, dt * 6);
+  const s = moving ? Math.sin(t * 8) * 0.6 : 0;
+  guide.legL.rotation.x = s; guide.legR.rotation.x = -s;
+  guide.armL.rotation.x = moving ? -s * 0.8 : (bubble.visible ? -0.5 + Math.sin(t * 3) * 0.2 : 0);
+  guide.armR.rotation.x = moving ? s * 0.8 : 0;
+  let az = 0.06;
+  if (waveT > 0) { waveT -= dt; az = 2.6 + Math.sin(t * 12) * 0.25; }
+  guide.armR.rotation.z += (az - guide.armR.rotation.z) * Math.min(1, dt * 8);
+  guide.torso.scale.y = 1 + Math.sin(t * 2) * 0.012;
+  guide.head.rotation.x = bubble.visible && !moving ? Math.sin(t * 4) * 0.04 : 0;
+}
+
+/* ============ NAVEGAÇÃO (setas) ============ */
+const dirFrom = (yaw, pitch, r) => {
+  const y = yaw * Math.PI / 180, p = pitch * Math.PI / 180;
+  return new THREE.Vector3(Math.sin(y) * Math.cos(p), Math.sin(p), -Math.cos(y) * Math.cos(p)).multiplyScalar(r);
+};
+let markers = [], title = null, pending = null, bright = 0;
+const disposeSprite = s => { scene.remove(s); s.material.map.dispose(); s.material.dispose(); };
+
+function applyStop(i) {
+  cur = i;
+  rig.position.set(STOPS[i].pos[0], 1.6, STOPS[i].pos[1]);
+  markers.forEach(m => disposeSprite(m.sp)); markers = [];
+  if (title) disposeSprite(title);
+  STOPS.forEach((s, j) => {
+    if (j === i) return;
+    const target = new THREE.Vector3(s.pos[0], 1.0, s.pos[1]);
+    const dist = target.distanceTo(rig.position), w = Math.min(2.8, Math.max(0.9, dist * 0.3));
+    const sp = makeSprite(s.nome, true, w); sp.position.copy(target); scene.add(sp);
+    markers.push({sp, to:j, need:1.3, dir:target.clone().sub(rig.position).normalize(), base:sp.scale.clone()});
+  });
+  title = makeSprite(STOPS[i].nome, false, 1.8);
+  title.position.copy(rig.position).add(dirFrom(0, -38, 2.2)); scene.add(title);
+  spot.set(STOPS[i].guia[0], 0, STOPS[i].guia[1]);          // a guia chega andando
+  gp.set(spot.x, 0, spot.z + 1.6); walking = true; bubble.visible = false;
+}
+const goTo = i => { if (pending === null && i !== cur) pending = i; };
+applyStop(0);
+
+/* ============ ORIENTAÇÃO (giroscópio do celular) ============ */
+const zee = new THREE.Vector3(0, 0, 1), euler = new THREE.Euler(), q0 = new THREE.Quaternion();
+const q1 = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5));
+const headQ = new THREE.Quaternion(), yawOff = new THREE.Quaternion();
+let hasGyro = false, needRecenter = false, yaw = 0, pitch = 0;
+addEventListener('deviceorientation', e => {
+  if (e.alpha == null) return;
+  hasGyro = true;
+  const d = Math.PI / 180, o = (screen.orientation ? screen.orientation.angle : window.orientation || 0) * d;
+  euler.set(e.beta * d, e.alpha * d, -e.gamma * d, 'YXZ');
+  headQ.setFromEuler(euler); headQ.multiply(q1); headQ.multiply(q0.setFromAxisAngle(zee, -o));
+  if (needRecenter) {                                        // ao iniciar, "frente" = para onde você olha
+    const f = new THREE.Vector3(0, 0, -1).applyQuaternion(headQ);
+    yawOff.setFromAxisAngle(new THREE.Vector3(0, 1, 0), -Math.atan2(-f.x, -f.z)); needRecenter = false;
+  }
+  rig.quaternion.copy(yawOff).multiply(headQ);
+});
+// alternativa para computador (sem giroscópio): arrastar com o mouse/dedo
+let drag = null;
+addEventListener('pointerdown', e => { drag = {x:e.clientX, y:e.clientY}; });
+addEventListener('pointerup', () => drag = null);
+addEventListener('pointermove', e => {
+  if (!drag || hasGyro) return;
+  yaw -= (e.clientX - drag.x) * 0.005; pitch = Math.max(-1.4, Math.min(1.4, pitch - (e.clientY - drag.y) * 0.005));
+  drag = {x:e.clientX, y:e.clientY}; rig.rotation.set(pitch, yaw, 0, 'YXZ');
+});
+
+/* ============ ESTÉREO + CORREÇÃO DE LENTE ============ */
+let stereo = false, rt = [null, null];
+const distMat = new THREE.ShaderMaterial({
+  uniforms: {tDiffuse:{value:null}, k1:{value:K1}, k2:{value:K2}, aspect:{value:1}, zoom:{value:ZOOM}},
+  vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+  fragmentShader: `precision highp float;
+    uniform sampler2D tDiffuse; uniform float k1, k2, aspect, zoom; varying vec2 vUv;
+    void main(){
+      vec2 p = (vUv - 0.5) * 2.0; p.x *= aspect;
+      float r2 = dot(p, p);
+      vec2 d = p * (1.0 + k1 * r2 + k2 * r2 * r2) / zoom; d.x /= aspect;
+      vec2 uv = d * 0.5 + 0.5;
+      if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
+      gl_FragColor = texture2D(tDiffuse, uv);
+    }`,
+  depthTest:false, depthWrite:false
+});
+const postScene = new THREE.Scene();
+postScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), distMat));
+const postCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+function resize() {
+  renderer.setSize(innerWidth, innerHeight);
+  rt.forEach(t => t && t.dispose());
+  const pr = renderer.getPixelRatio(), w = Math.max(2, Math.floor(innerWidth * pr / 2)), h = Math.max(2, Math.floor(innerHeight * pr));
+  rt = [0, 1].map(() => new THREE.WebGLRenderTarget(w, h, {minFilter:THREE.LinearFilter, magFilter:THREE.LinearFilter}));
+}
+addEventListener('resize', resize); resize();
+
+function draw() {
+  const w = innerWidth, h = innerHeight;
+  if (!stereo) {
+    renderer.setRenderTarget(null); renderer.setScissorTest(false); renderer.setViewport(0, 0, w, h);
+    camera.aspect = w / h; camera.updateProjectionMatrix(); camera.position.x = 0;
+    renderer.render(scene, camera); return;
+  }
+  camera.aspect = (w / 2) / h; camera.updateProjectionMatrix(); distMat.uniforms.aspect.value = (w / 2) / h;
+  renderer.setScissorTest(false); renderer.setRenderTarget(null); renderer.clear();
+  [-1, 1].forEach((side, i) => {
+    camera.position.x = side * IPD / 2;
+    renderer.setRenderTarget(rt[i]); renderer.render(scene, camera);
+    renderer.setRenderTarget(null); renderer.setScissorTest(true);
+    renderer.setViewport(i * w / 2, 0, w / 2, h); renderer.setScissor(i * w / 2, 0, w / 2, h);
+    distMat.uniforms.tDiffuse.value = rt[i].texture; renderer.render(postScene, postCam);
+  });
+  renderer.setScissorTest(false);
+}
+
+/* ============ LOOP ============ */
+const clock = new THREE.Clock(), fwd = new THREE.Vector3(), tmp = new THREE.Vector3();
+const COS_M = Math.cos(9 * Math.PI / 180), COS_G = Math.cos(14 * Math.PI / 180);
+const guideTarget = {guide:true, need:2.2};
+let gazed = null, dwell = 0;
+
+function activate(h) { if (h.guide) nextLine(); else goTo(h.to); }
+
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.1), t = clock.elapsedTime;
+  if (pending !== null) { bright -= dt * 3; if (bright <= 0) { bright = 0; applyStop(pending); pending = null; } }
+  else if (bright < 1) bright = Math.min(1, bright + dt * 3);
+  fade.material.opacity = 1 - bright;
+
+  animGuide(dt, t);
+
+  fwd.set(0, 0, -1).applyQuaternion(rig.quaternion);
+  let hit = null;
+  if (pending === null) {
+    markers.forEach(m => {
+      const on = fwd.dot(m.dir) > COS_M;
+      m.sp.scale.copy(m.base).multiplyScalar(on ? 1.18 : 1); m.sp.material.opacity = bright;
+      if (on) hit = m;
+    });
+    if (!walking && bubble.visible) { tmp.set(gp.x, 1.2, gp.z).sub(rig.position).normalize(); if (fwd.dot(tmp) > COS_G) hit = guideTarget; }
+  }
+  if (title) title.material.opacity = bright * 0.9;
+  if (hit && hit === gazed) dwell += dt; else { dwell = 0; gazed = hit; }
+  fill.scale.setScalar(Math.max(0.001, Math.min(dwell / (gazed ? gazed.need : 1), 1)));
+  if (hit && dwell >= hit.need) { dwell = 0; activate(hit); }
+
+  draw();
+});
+
+/* ============ INICIAR / SAIR / TOQUE ============ */
+document.getElementById('go').addEventListener('click', async () => {
+  try {
+    if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function')
+      await DeviceOrientationEvent.requestPermission();      // iOS exige um toque do usuário
+  } catch (err) { console.warn(err); }
+  try {
+    await document.documentElement.requestFullscreen();
+    if (screen.orientation && screen.orientation.lock) await screen.orientation.lock('landscape');
+  } catch (err) {}
+  document.getElementById('intro').style.display = 'none';
+  needRecenter = true; stereo = true;
+});
+let lastTap = 0;
+addEventListener('pointerdown', () => {
+  if (!stereo) return;
+  if (gazed) { activate(gazed); dwell = 0; lastTap = 0; return; }   // toque / botão do Cardboard = ativa o que você olha
+  const now = Date.now();
+  if (now - lastTap < 350) {                                         // toque duplo sai do modo VR
+    stereo = false; if (document.fullscreenElement) document.exitFullscreen();
+    document.getElementById('intro').style.display = 'flex';
+  }
+  lastTap = now;
+});
+</script>
+</body>
+</html>
